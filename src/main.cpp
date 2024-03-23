@@ -7,25 +7,27 @@ MPU6050 mpu;
 bool blinkState = false;
 
 // Variable to handle the rotation
-float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
-int smoothTimer = 900; // Time (in ms) to smooth the rotation
-int MPUTaskDelay = 25;  // Time (in ms) to wait between each loop
+float ypr[3];            // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+float avgPR[2] = {0};    // [pitch, roll]        array to store the average pitch and roll
+float offsetPR[2] = {0}; // [pitch, roll]       array to store the offset pitch and roll
+int smoothTimer = 900;   // Time (in ms) to smooth the rotation
+int MPUTaskDelay = 25;   // Time (in ms) to wait between each loop
 
 // Task to handle the MPU
 TaskHandle_t MPUTaskHandler = NULL;
 void MPUTask(void *pvParameters) {
-    int smoothSize = (smoothTimer + 100) / MPUTaskDelay; // Number of values to store to smooth the rotation
+    vTaskSuspend(NULL);
+    int smootherSize = (smoothTimer + 100) / MPUTaskDelay; // Number of values to store to smooth the rotation
 
     // Declaration of variables that handle the orientation/rotation
     Quaternion q;        // [w, x, y, z]         quaternion container
     VectorFloat gravity; // [x, y, z]            gravity vector
 
     // Declaration of variables that handle, control and store the status data of the MPU
-    bool dmpReady = false;                       // set true if DMP init was successful
-    // uint8_t devStatus;                           // return status after each device operation (0 = success, !0 = error)
-    uint8_t fifoBuffer[64];                      // FIFO storage buffer
-    float rotationSmoother[smoothSize][2] = {0}; // [pitch, roll] array to store the last X values of pitch and roll to calculate and smooth the rotation
-    int currentSmoothIndex = 0;
+    bool dmpReady = false;                              // set true if DMP init was successful
+    uint8_t fifoBuffer[64];                             // FIFO storage buffer
+    float rotationSmootherArray[smootherSize][2] = {0}; // [pitch, roll] array to store the last X values of pitch and roll to calculate and smooth the rotation
+    int rotationSmootherIndex = 0;                      // Index to store the current value of the rotationSmootherArray
 
     Wire.begin();
     Wire.setClock(400000);
@@ -37,6 +39,7 @@ void MPUTask(void *pvParameters) {
     mpu.setYGyroOffset(1437); // 1437
     mpu.setZGyroOffset(1755); // 1755
     mpu.setZAccelOffset(22);  // 22
+
     if (devStatus == 0) {
         mpu.CalibrateAccel(12);
         mpu.CalibrateGyro(12);
@@ -63,31 +66,26 @@ void MPUTask(void *pvParameters) {
             mpu.dmpGetGravity(&gravity, &q);
             mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
 
-            rotationSmoother[currentSmoothIndex][0] = ypr[1] * 180 / M_PI;
-            rotationSmoother[currentSmoothIndex][1] = ypr[2] * 180 / M_PI;
+            rotationSmootherArray[rotationSmootherIndex][0] = ypr[1] * 180 / M_PI;
+            rotationSmootherArray[rotationSmootherIndex][1] = ypr[2] * 180 / M_PI;
 
-            // Increment the index, wrapping back to 0 if it exceeds smoothSize
-            currentSmoothIndex = (currentSmoothIndex + 1) % smoothSize;
+            // Increment the index, wrapping back to 0 if it exceeds smootherSize
+            rotationSmootherIndex = (rotationSmootherIndex + 1) % smootherSize;
 
             // Calculate the average pitch and roll
-            float avgPitch = 0, avgRoll = 0;
-            for (int i = 0; i < smoothSize; i++) {
-                avgPitch += rotationSmoother[i][0];
-                avgRoll += rotationSmoother[i][1];
+            for (int i = 0; i < smootherSize; i++) {
+                avgPR[0] += rotationSmootherArray[i][0];
+                avgPR[1] += rotationSmootherArray[i][1];
             }
-            avgPitch /= smoothSize;
-            avgRoll /= smoothSize;
+            avgPR[0] /= smootherSize;
+            avgPR[1] /= smootherSize;
 
-            // print the time between each loop
             Serial.print(" pr\t");
-            // Yaw is not needed
-            // Serial.print(ypr[0] * 180 / M_PI);
-            // Serial.print("\t");
-            Serial.print(avgPitch);
-            Serial.print("\t");
-            Serial.print(avgRoll);
+            Serial.print(avgPR[0]);
             Serial.print("\t");
             Serial.print(ypr[1] * 180 / M_PI);
+            Serial.print("\t");
+            Serial.print(avgPR[1]);
             Serial.print("\t");
             Serial.println(ypr[2] * 180 / M_PI);
         }
@@ -108,13 +106,9 @@ int taskCreated = 0;
 void loop() {
     if (digitalRead(2) == HIGH) {
         if (taskCreated) {
-            Serial.println("Deleting Task");
             vTaskSuspend(MPUTaskHandler);
-            Serial.println("Task Deleted");
         } else {
-            Serial.println("Creating Task");
             vTaskResume(MPUTaskHandler);
-            Serial.println("Task Created");
         }
         Serial.println(eTaskGetState(MPUTaskHandler));
         taskCreated = !taskCreated;
