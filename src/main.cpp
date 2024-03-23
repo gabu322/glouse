@@ -1,237 +1,128 @@
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"
 #include "Wire.h"
-#include <Arduino.h>
-#include <BleMouse.h>
 
-/* ============================================
-I2Cdev device library code is placed under the MIT license
-Copyright (c) 2012 Jeff Rowberg
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-===============================================
-*/
-
-int processValue(int input) {
-    if (input >= -2.5 && input <= 2.5) {
-        return 0;
-    }
-
-    int savedValue = input;
-    int mappedValue;
-    // Map the saved value to a range between 0 and 30
-    if (input > 0) {
-        mappedValue = map(savedValue, 0, 45, 0, 30);
-    } else {
-        mappedValue = map(savedValue, 0, -30, 0, 30);
-    }
-
-    // Apply the formula
-    int processedValue = ((mappedValue / 4) + sq(mappedValue / 3)) / 2;
-
-    // Add the original sign to the result
-    if (input < 0) {
-        processedValue *= -1;
-    }
-
-    return processedValue;
-}
-
-// class default I2C address is 0x68
 MPU6050 mpu;
 
-Quaternion q;        // [w, x, y, z]         quaternion container
-VectorFloat gravity; // [x, y, z]            gravity vector
-float ypr[3];
-uint8_t fifoBuffer[64]; // FIFO storage buffer
+bool blinkState = false;
 
-float baseRotations[3];
+// Variable to handle the rotation
+float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+int smoothTimer = 900; // Time (in ms) to smooth the rotation
+int MPUTaskDelay = 25;  // Time (in ms) to wait between each loop
 
-bool dmpReady = false; // set true if DMP init was successful
-uint8_t devStatus;
-uint16_t packetSize; // expected DMP packet size (default is 42 bytes)
-
-unsigned long lastBufferUpdateTime = 0;
-bool isReadyToCheck = true; // Flag to indicate when to start checking
-
-bool stable = false; // Flag to indicate when the mouse is stable
+// Task to handle the MPU
 TaskHandle_t MPUTaskHandler = NULL;
 void MPUTask(void *pvParameters) {
-    float rotationsOffset[3] = {0, 0, 0};
+    int smoothSize = (smoothTimer + 100) / MPUTaskDelay; // Number of values to store to smooth the rotation
 
-    // Suspend the task until the button is pressed
-    vTaskSuspend(NULL);
+    // Declaration of variables that handle the orientation/rotation
+    Quaternion q;        // [w, x, y, z]         quaternion container
+    VectorFloat gravity; // [x, y, z]            gravity vector
 
-    // Set the minimun delay between task executions to 20ms
-    const TickType_t taskDelay = 10 / portTICK_PERIOD_MS;
-    TickType_t lastExecutionTime = xTaskGetTickCount();
+    // Declaration of variables that handle, control and store the status data of the MPU
+    bool dmpReady = false;                       // set true if DMP init was successful
+    // uint8_t devStatus;                           // return status after each device operation (0 = success, !0 = error)
+    uint8_t fifoBuffer[64];                      // FIFO storage buffer
+    float rotationSmoother[smoothSize][2] = {0}; // [pitch, roll] array to store the last X values of pitch and roll to calculate and smooth the rotation
+    int currentSmoothIndex = 0;
 
-    // Initialize the MPU6050 And set the offsets
+    Wire.begin();
+    Wire.setClock(400000);
+
     mpu.initialize();
+    int devStatus = mpu.dmpInitialize();
 
-    devStatus = mpu.dmpInitialize();
     mpu.setXGyroOffset(1803); // 1803
     mpu.setYGyroOffset(1437); // 1437
     mpu.setZGyroOffset(1755); // 1755
     mpu.setZAccelOffset(22);  // 22
-
-    // make sure it worked (returns 0 if so)
     if (devStatus == 0) {
-        // Calibration Time: generate offsets and calibrate our MPU6050
-        mpu.CalibrateAccel(10);
-        mpu.CalibrateGyro(10);
+        mpu.CalibrateAccel(12);
+        mpu.CalibrateGyro(12);
+        mpu.PrintActiveOffsets();
         mpu.setDMPEnabled(true);
         dmpReady = true;
-        packetSize = mpu.dmpGetFIFOPacketSize();
     } else {
-        // Serial.print(F("DMP Initialization failed (code "));
-        // Serial.print(devStatus);
-        // Serial.println(F(")"));
+        Serial.println("DMP Initialization failed");
     }
 
-    // Verification of MPU estabilization
-    const int bufferSize = 40; // Assuming 20ms delay, this is 0.5 seconds' worth
-    float yprBuffer[bufferSize];
-    for (int i = 0; i < bufferSize; i++) {
-    }
+    const TickType_t taskDelay = MPUTaskDelay / portTICK_PERIOD_MS;
+    TickType_t lastExecutionTime = xTaskGetTickCount();
 
-    int bufferIndex = 0;
-
-    int lastTaskStartTime = millis();
-    digitalWrite(2, LOW);
+    int timer = 0;
     for (;;) {
         vTaskDelayUntil(&lastExecutionTime, taskDelay);
         if (!dmpReady) {
-            // Serial.println("DMP not ready!");
             continue;
         }
+
         if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
 
             mpu.dmpGetQuaternion(&q, fifoBuffer);
             mpu.dmpGetGravity(&gravity, &q);
             mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-            for (int i = 0; i < 3; i++) {
-                ypr[i] = ypr[i] * 180 / M_PI;
-            }
 
-            if (!stable) {
-                yprBuffer[bufferIndex] = ypr[0];
-                bufferIndex = (bufferIndex + 1) % bufferSize;
-            }
+            rotationSmoother[currentSmoothIndex][0] = ypr[1] * 180 / M_PI;
+            rotationSmoother[currentSmoothIndex][1] = ypr[2] * 180 / M_PI;
 
-            // Check if 1 second has elapsed to set the flag isReadyToCheck
-            if (millis() - lastTaskStartTime >= 1000) {
-                if (isReadyToCheck) {
-                    stable = true;
-                    for (int i = 0; i < bufferSize; i++) {
-                        if (abs(yprBuffer[i] - ypr[0]) > 0.5) {
-                            stable = false;
-                        }
-                    }
-                    if (stable) {
-                        isReadyToCheck = false;
-                        digitalWrite(2, HIGH);
-                        for (int i = 0; i < 3; i++) {
-                            baseRotations[i] = ypr[i];
-                        }
-                    }
-                    // if (Serial) {
-                    //     Serial.print("Stabilyzing\t");
-                    //     Serial.print(ypr[0]);
-                    //     Serial.print("\t");
-                    // }
-                } else {
-                    // if (Serial) {
-                    //     Serial.print("Values: \t");
-                    //     Serial.print(ypr[1]);
-                    //     Serial.print("\t");
-                    //     Serial.print(
-                    //         -processValue(-(ypr[1] - baseRotations[1])));
-                    //     Serial.print("\t");
-                    //     Serial.print(ypr[2]);
-                    //     Serial.print("\t");
-                    //     Serial.print(
-                    //         processValue(-(ypr[2] - baseRotations[2])));
-                    //     Serial.println("\t");
-                    // }
-                }
+            // Increment the index, wrapping back to 0 if it exceeds smoothSize
+            currentSmoothIndex = (currentSmoothIndex + 1) % smoothSize;
+
+            // Calculate the average pitch and roll
+            float avgPitch = 0, avgRoll = 0;
+            for (int i = 0; i < smoothSize; i++) {
+                avgPitch += rotationSmoother[i][0];
+                avgRoll += rotationSmoother[i][1];
             }
+            avgPitch /= smoothSize;
+            avgRoll /= smoothSize;
+
+            // print the time between each loop
+            Serial.print(" pr\t");
+            // Yaw is not needed
+            // Serial.print(ypr[0] * 180 / M_PI);
+            // Serial.print("\t");
+            Serial.print(avgPitch);
+            Serial.print("\t");
+            Serial.print(avgRoll);
+            Serial.print("\t");
+            Serial.print(ypr[1] * 180 / M_PI);
+            Serial.print("\t");
+            Serial.println(ypr[2] * 180 / M_PI);
         }
     }
 }
 
-BleMouse bleMouse("Glouse", "gabu", 100);
-
-int taskButtonPin = 23;
 void setup() {
-    // Serial.begin(115200);
-    // delay(300);
+    Serial.begin(115200);
 
-    bleMouse.begin();
-    delay(300);
-    Wire.begin();
-    Wire.setClock(400000);
-    xTaskCreatePinnedToCore(MPUTask, "MPUTask", 10000, NULL, 1, &MPUTaskHandler, 1);
-    pinMode(2, OUTPUT);
-    pinMode(taskButtonPin, INPUT_PULLDOWN);
+    delay(1000);
+    xTaskCreatePinnedToCore(MPUTask, "MPUTask", 20000, NULL, 1, &MPUTaskHandler, 1);
+    vTaskSuspend(MPUTaskHandler);
+    pinMode(2, INPUT_PULLDOWN);
 }
 
-bool firstConnection = false;
-double actualTime = 0;
+int timer = 0;
+int taskCreated = 0;
 void loop() {
-    // Serial.println(bleMouse.isConnected() ? "Connected" : "Not connected");
-    // Serial.println(eTaskGetState(MPUTaskHandler));
-    if (bleMouse.isConnected()) {
-        if (!firstConnection) {
-            firstConnection = true;
-            digitalWrite(2, HIGH);
-        }
-        if (stable) {
-            // if (Serial) {
-            //     Serial.print("Values: \t");
-            //     Serial.print(ypr[1]);
-            //     Serial.print("\t");
-            //     Serial.print(processValue(ypr[1] - baseRotations[1]));
-            //     Serial.print("\t");
-            //     Serial.print(ypr[2]);
-            //     Serial.print("\t");
-            //     Serial.print(-processValue(ypr[2] - baseRotations[2]));
-            //     Serial.println("\t");
-            // }
-            bleMouse.move(processValue(-(ypr[1] - baseRotations[1])), 0, 0);
-            bleMouse.move(0, processValue(-(ypr[2] - baseRotations[2])), 0);
-        }
-        if (
-            // digitalRead(taskButtonPin) == HIGH &&
-            eTaskGetState(MPUTaskHandler) == 3) {
-            delay(1000);
-            vTaskResume(MPUTaskHandler);
-        }
-        if (touchRead(4) < 15) {
-            bleMouse.press(MOUSE_LEFT);
+    if (digitalRead(2) == HIGH) {
+        if (taskCreated) {
+            Serial.println("Deleting Task");
+            vTaskSuspend(MPUTaskHandler);
+            Serial.println("Task Deleted");
         } else {
-            bleMouse.release(MOUSE_LEFT);
+            Serial.println("Creating Task");
+            vTaskResume(MPUTaskHandler);
+            Serial.println("Task Created");
         }
+        Serial.println(eTaskGetState(MPUTaskHandler));
+        taskCreated = !taskCreated;
+        delay(500);
     }
-    // Delay to keep the loop from running too fast
-    if (!(millis() - actualTime) < 20) {
-        actualTime = millis();
-        delay(20 - (millis() - actualTime));
+    // if the task isnt running, is suspended or deleted
+    if (eTaskGetState(MPUTaskHandler) == eDeleted || eTaskGetState(MPUTaskHandler) == eSuspended) {
+        Serial.println("Task is not running");
     }
+    delay(100);
 }
