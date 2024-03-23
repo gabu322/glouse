@@ -53,36 +53,38 @@ int processValue(int input) {
     return processedValue;
 }
 
+// class default I2C address is 0x68
 MPU6050 mpu;
+
+Quaternion q;        // [w, x, y, z]         quaternion container
+VectorFloat gravity; // [x, y, z]            gravity vector
 float ypr[3];
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+
 float baseRotations[3];
 
 bool dmpReady = false; // set true if DMP init was successful
 uint8_t devStatus;
-uint16_t packetSize;       // expected DMP packet size (default is 42 bytes)
-uint8_t fifoBuffer[64];    // FIFO storage buffer
-Quaternion q;              // [w, x, y, z]         quaternion container
-VectorFloat gravity;       // [x, y, z]            gravity vector
-const int bufferSize = 40; // Assuming 20ms delay, this is 0.5 seconds' worth
-float yprBuffer[bufferSize];
-int bufferIndex = 0;
+uint16_t packetSize; // expected DMP packet size (default is 42 bytes)
+
 unsigned long lastBufferUpdateTime = 0;
 bool isReadyToCheck = true; // Flag to indicate when to start checking
 
 bool stable = false; // Flag to indicate when the mouse is stable
 TaskHandle_t MPUTaskHandler = NULL;
 void MPUTask(void *pvParameters) {
+    float rotationsOffset[3] = {0, 0, 0};
+
     // Suspend the task until the button is pressed
     vTaskSuspend(NULL);
 
     // Set the minimun delay between task executions to 20ms
-    const TickType_t taskDelay = 20 / portTICK_PERIOD_MS;
+    const TickType_t taskDelay = 10 / portTICK_PERIOD_MS;
     TickType_t lastExecutionTime = xTaskGetTickCount();
 
     // Initialize the MPU6050 And set the offsets
     mpu.initialize();
-    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful")
-                                        : F("MPU6050 connection failed"));
+
     devStatus = mpu.dmpInitialize();
     mpu.setXGyroOffset(1803); // 1803
     mpu.setYGyroOffset(1437); // 1437
@@ -92,24 +94,31 @@ void MPUTask(void *pvParameters) {
     // make sure it worked (returns 0 if so)
     if (devStatus == 0) {
         // Calibration Time: generate offsets and calibrate our MPU6050
-        mpu.CalibrateAccel(6);
-        mpu.CalibrateGyro(6);
-        mpu.PrintActiveOffsets();
+        mpu.CalibrateAccel(10);
+        mpu.CalibrateGyro(10);
         mpu.setDMPEnabled(true);
         dmpReady = true;
         packetSize = mpu.dmpGetFIFOPacketSize();
     } else {
-        Serial.print(F("DMP Initialization failed (code "));
-        Serial.print(devStatus);
-        Serial.println(F(")"));
+        // Serial.print(F("DMP Initialization failed (code "));
+        // Serial.print(devStatus);
+        // Serial.println(F(")"));
     }
+
+    // Verification of MPU estabilization
+    const int bufferSize = 40; // Assuming 20ms delay, this is 0.5 seconds' worth
+    float yprBuffer[bufferSize];
+    for (int i = 0; i < bufferSize; i++) {
+    }
+
+    int bufferIndex = 0;
 
     int lastTaskStartTime = millis();
     digitalWrite(2, LOW);
     for (;;) {
         vTaskDelayUntil(&lastExecutionTime, taskDelay);
         if (!dmpReady) {
-            Serial.println("DMP not ready!");
+            // Serial.println("DMP not ready!");
             continue;
         }
         if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
@@ -131,7 +140,7 @@ void MPUTask(void *pvParameters) {
                 if (isReadyToCheck) {
                     stable = true;
                     for (int i = 0; i < bufferSize; i++) {
-                        if (abs(yprBuffer[i] - ypr[0]) > 0.2) {
+                        if (abs(yprBuffer[i] - ypr[0]) > 0.5) {
                             stable = false;
                         }
                     }
@@ -142,43 +151,43 @@ void MPUTask(void *pvParameters) {
                             baseRotations[i] = ypr[i];
                         }
                     }
-                    if (Serial) {
-                        Serial.print("Stabilyzing\t");
-                        Serial.print(ypr[0]);
-                        Serial.print("\t");
-                    }
-                } /*else {
-                    if (Serial) {
-                        Serial.print("Values: \t");
-                        Serial.print(ypr[1]);
-                        Serial.print("\t");
-                        Serial.print(
-                            -processValue(-(ypr[1] - baseRotations[1])));
-                        Serial.print("\t");
-                        Serial.print(ypr[2]);
-                        Serial.print("\t");
-                        Serial.print(
-                            processValue(-(ypr[2] - baseRotations[2])));
-                        Serial.println("\t");
-                    }
-                }*/
+                    // if (Serial) {
+                    //     Serial.print("Stabilyzing\t");
+                    //     Serial.print(ypr[0]);
+                    //     Serial.print("\t");
+                    // }
+                } else {
+                    // if (Serial) {
+                    //     Serial.print("Values: \t");
+                    //     Serial.print(ypr[1]);
+                    //     Serial.print("\t");
+                    //     Serial.print(
+                    //         -processValue(-(ypr[1] - baseRotations[1])));
+                    //     Serial.print("\t");
+                    //     Serial.print(ypr[2]);
+                    //     Serial.print("\t");
+                    //     Serial.print(
+                    //         processValue(-(ypr[2] - baseRotations[2])));
+                    //     Serial.println("\t");
+                    // }
+                }
             }
         }
     }
 }
 
-BleMouse bleMouse;
+BleMouse bleMouse("Glouse", "gabu", 100);
+
 int taskButtonPin = 23;
 void setup() {
-    Serial.begin(115200);
-    delay(300);
+    // Serial.begin(115200);
+    // delay(300);
 
     bleMouse.begin();
     delay(300);
     Wire.begin();
     Wire.setClock(400000);
-    xTaskCreatePinnedToCore(MPUTask, "MPUTask", 10000, NULL, 1, &MPUTaskHandler,
-                            1);
+    xTaskCreatePinnedToCore(MPUTask, "MPUTask", 10000, NULL, 1, &MPUTaskHandler, 1);
     pinMode(2, OUTPUT);
     pinMode(taskButtonPin, INPUT_PULLDOWN);
 }
@@ -186,28 +195,32 @@ void setup() {
 bool firstConnection = false;
 double actualTime = 0;
 void loop() {
+    // Serial.println(bleMouse.isConnected() ? "Connected" : "Not connected");
+    // Serial.println(eTaskGetState(MPUTaskHandler));
     if (bleMouse.isConnected()) {
-        if(!firstConnection){
+        if (!firstConnection) {
             firstConnection = true;
             digitalWrite(2, HIGH);
         }
         if (stable) {
-            if (Serial) {
-                Serial.print("Values: \t");
-                Serial.print(ypr[1]);
-                Serial.print("\t");
-                Serial.print(processValue(ypr[1] - baseRotations[1]));
-                Serial.print("\t");
-                Serial.print(ypr[2]);
-                Serial.print("\t");
-                Serial.print(-processValue(ypr[2] - baseRotations[2]));
-                Serial.println("\t");
-            }
-            bleMouse.move(processValue(ypr[1] - baseRotations[1]), 0, 0);
+            // if (Serial) {
+            //     Serial.print("Values: \t");
+            //     Serial.print(ypr[1]);
+            //     Serial.print("\t");
+            //     Serial.print(processValue(ypr[1] - baseRotations[1]));
+            //     Serial.print("\t");
+            //     Serial.print(ypr[2]);
+            //     Serial.print("\t");
+            //     Serial.print(-processValue(ypr[2] - baseRotations[2]));
+            //     Serial.println("\t");
+            // }
+            bleMouse.move(processValue(-(ypr[1] - baseRotations[1])), 0, 0);
             bleMouse.move(0, processValue(-(ypr[2] - baseRotations[2])), 0);
         }
-        if (digitalRead(taskButtonPin) == HIGH &&
+        if (
+            // digitalRead(taskButtonPin) == HIGH &&
             eTaskGetState(MPUTaskHandler) == 3) {
+            delay(1000);
             vTaskResume(MPUTaskHandler);
         }
         if (touchRead(4) < 15) {
