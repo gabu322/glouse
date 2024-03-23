@@ -92,12 +92,22 @@ void MPUTask(void *pvParameters) {
     }
 }
 
+// BLE Mouse Task
+TaskHandle_t BLEMouseTaskHandler = NULL;
+void BLEMouseTask(void *pvParameters) {
+    vTaskSuspend(NULL);
+    for (;;) {
+        vTaskDelay(1000);
+    }
+}
+
+
 void setup() {
     Serial.begin(115200);
 
     delay(1000);
     xTaskCreatePinnedToCore(MPUTask, "MPUTask", 20000, NULL, 1, &MPUTaskHandler, 1);
-    vTaskSuspend(MPUTaskHandler);
+    xTaskCreatePinnedToCore(BLEMouseTask, "BLEMouseTask", 10000, NULL, 1, &BLEMouseTaskHandler, 1);
     pinMode(2, INPUT_PULLDOWN);
 }
 
@@ -116,7 +126,7 @@ void loop() {
     }
     // if the task isnt running, is suspended or deleted
     if (eTaskGetState(MPUTaskHandler) == eDeleted || eTaskGetState(MPUTaskHandler) == eSuspended) {
-        Serial.println("Task is not running");
+        Serial.println("MPU Task not runnung");
     }
     delay(100);
 }
