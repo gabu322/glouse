@@ -1,27 +1,29 @@
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"
 #include "Wire.h"
+#include <Arduino.h>
+#include <BleMouse.h>
 
 MPU6050 mpu;
 
 bool blinkState = false;
 
 // Variable to handle the rotation
-float ypr[3];            // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
-float avgPR[2] = {0};    // [pitch, roll]        array to store the average pitch and roll
-float offsetPR[2] = {0}; // [pitch, roll]       array to store the offset pitch and roll
-int smoothTimer = 900;   // Time (in ms) to smooth the rotation
-int MPUTaskDelay = 25;   // Time (in ms) to wait between each loop
+float offsetPR[2] = {0};                               // [pitch, roll]       array to store the offset pitch and roll
+float calculatedRotations[2] = {0};                    // [pitch, roll]       array to store the calculated pitch and roll
+int smoothTimer = 100;                                 // Time (in ms) to smooth the rotation
+int MPUTaskDelay = 25;                                 // Time (in ms) to wait between each loop
+int smootherSize = (smoothTimer + 100) / MPUTaskDelay; // Number of values to store to smooth the rotation
 
 // Task to handle the MPU
 TaskHandle_t MPUTaskHandler = NULL;
 void MPUTask(void *pvParameters) {
-    vTaskSuspend(NULL);
-    int smootherSize = (smoothTimer + 100) / MPUTaskDelay; // Number of values to store to smooth the rotation
 
     // Declaration of variables that handle the orientation/rotation
-    Quaternion q;        // [w, x, y, z]         quaternion container
-    VectorFloat gravity; // [x, y, z]            gravity vector
+    Quaternion q;         // [w, x, y, z]         quaternion container
+    VectorFloat gravity;  // [x, y, z]            gravity vector
+    float ypr[3];         // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+    float avgPR[2] = {0}; // [pitch, roll]        array to store the average pitch and roll
 
     // Declaration of variables that handle, control and store the status data of the MPU
     bool dmpReady = false;                              // set true if DMP init was successful
@@ -46,19 +48,16 @@ void MPUTask(void *pvParameters) {
         mpu.PrintActiveOffsets();
         mpu.setDMPEnabled(true);
         dmpReady = true;
+        digitalWrite(2, HIGH);
     } else {
         Serial.println("DMP Initialization failed");
     }
 
     const TickType_t taskDelay = MPUTaskDelay / portTICK_PERIOD_MS;
     TickType_t lastExecutionTime = xTaskGetTickCount();
-
     int timer = 0;
     for (;;) {
         vTaskDelayUntil(&lastExecutionTime, taskDelay);
-        if (!dmpReady) {
-            continue;
-        }
 
         if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
 
@@ -66,67 +65,88 @@ void MPUTask(void *pvParameters) {
             mpu.dmpGetGravity(&gravity, &q);
             mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
 
-            rotationSmootherArray[rotationSmootherIndex][0] = ypr[1] * 180 / M_PI;
-            rotationSmootherArray[rotationSmootherIndex][1] = ypr[2] * 180 / M_PI;
+            // do ALL the code below in only one for
+            for (int i = 0; i <= 1; i++) {
+                rotationSmootherArray[rotationSmootherIndex][i] = ypr[i + 1] * 180 / M_PI;
 
-            // Increment the index, wrapping back to 0 if it exceeds smootherSize
-            rotationSmootherIndex = (rotationSmootherIndex + 1) % smootherSize;
+                for (int j = 0; j < smootherSize; j++) {
+                    avgPR[i] += rotationSmootherArray[j][i];
+                }
+                avgPR[i] = (avgPR[i] / smootherSize) - offsetPR[i];
 
-            // Calculate the average pitch and roll
-            for (int i = 0; i < smootherSize; i++) {
-                avgPR[0] += rotationSmootherArray[i][0];
-                avgPR[1] += rotationSmootherArray[i][1];
+                if (avgPR[i] > 5 || avgPR[i] < -5) {
+                    calculatedRotations[i] = map(avgPR[i], -90, 90, 50, -50);
+                    calculatedRotations[i] = (0.024 * calculatedRotations[i] * abs(calculatedRotations[i])) - 0.2 * abs(calculatedRotations[i]);
+                } else {
+                    calculatedRotations[i] = 0;
+                }
             }
-            avgPR[0] /= smootherSize;
-            avgPR[1] /= smootherSize;
-
-            Serial.print(" pr\t");
-            Serial.print(avgPR[0]);
-            Serial.print("\t");
-            Serial.print(ypr[1] * 180 / M_PI);
-            Serial.print("\t");
-            Serial.print(avgPR[1]);
-            Serial.print("\t");
-            Serial.println(ypr[2] * 180 / M_PI);
+            rotationSmootherIndex = (rotationSmootherIndex + 1) % smootherSize;
         }
     }
 }
 
-// BLE Mouse Task
-TaskHandle_t BLEMouseTaskHandler = NULL;
-void BLEMouseTask(void *pvParameters) {
-    vTaskSuspend(NULL);
-    for (;;) {
-        vTaskDelay(1000);
-    }
-}
+// * BLE Mouse task
 
+// Fill touch data
+
+BleMouse bleMouse("Glouse", "gabu", 100);
 
 void setup() {
     Serial.begin(115200);
 
-    delay(1000);
+    delay(200);
     xTaskCreatePinnedToCore(MPUTask, "MPUTask", 20000, NULL, 1, &MPUTaskHandler, 1);
-    xTaskCreatePinnedToCore(BLEMouseTask, "BLEMouseTask", 10000, NULL, 1, &BLEMouseTaskHandler, 1);
-    pinMode(2, INPUT_PULLDOWN);
+
+    delay(200);
+    bleMouse.begin();
+
+    pinMode(2, OUTPUT);
 }
 
-int timer = 0;
-int taskCreated = 0;
+// Readable touches:
+// T3: pin 15
+// T4: pin 13
+// T5: pin 12
+// T6: pin 14
+// T7: pin 27
+// T8: pin 33
+// T9: pin 32
+typedef struct MouseButton {
+    int touchPin;
+    int mouseButton;
+    int touchValue;
+    int touchValueTreshold;
+    bool pressed;
+} MouseButton;
+// Delaration of mouse clicks
+MouseButton mouseButtons[3] = {
+    {T3, MOUSE_LEFT, 100, 20, false},
+    {T4, MOUSE_RIGHT, 100, 20, false},
+    {T5, MOUSE_MIDDLE, 100, 20, false},
+};
+int minLoopTimer = 0;
 void loop() {
-    if (digitalRead(2) == HIGH) {
-        if (taskCreated) {
-            vTaskSuspend(MPUTaskHandler);
-        } else {
-            vTaskResume(MPUTaskHandler);
+
+    if (bleMouse.isConnected()) {
+        // Rotate the mouse, and the scroll if button X is pressed
+        bleMouse.move(calculatedRotations[0], calculatedRotations[1], 0);
+
+        // Code for mouse buttons
+        for (int i = 0; i < 3; i++) {
+            mouseButtons[i].touchValue = touchRead(mouseButtons[i].touchPin);
+            mouseButtons[i].pressed = bleMouse.isPressed(mouseButtons[i].mouseButton);
+            if (mouseButtons[i].touchValue > mouseButtons[i].touchValueTreshold && mouseButtons[i].pressed) {
+                bleMouse.release(mouseButtons[i].mouseButton);
+            } else if (mouseButtons[i].touchValue < mouseButtons[i].touchValueTreshold && !mouseButtons[i].pressed) {
+                bleMouse.press(mouseButtons[i].mouseButton);
+            }
         }
-        Serial.println(eTaskGetState(MPUTaskHandler));
-        taskCreated = !taskCreated;
-        delay(500);
     }
-    // if the task isnt running, is suspended or deleted
-    if (eTaskGetState(MPUTaskHandler) == eDeleted || eTaskGetState(MPUTaskHandler) == eSuspended) {
-        Serial.println("MPU Task not runnung");
+
+    // Ensure the loop runs at a minimum rate
+    if (millis() - minLoopTimer < 20) {
+        delay(20 - (millis() - minLoopTimer));
     }
-    delay(100);
+    minLoopTimer = millis();
 }
