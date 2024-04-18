@@ -9,11 +9,14 @@ MPU6050 mpu;
 bool blinkState = false;
 
 // Variable to handle the rotation
-float offsetPR[2] = {0};                               // [pitch, roll]       array to store the offset pitch and roll
-float calculatedRotations[2] = {0};                    // [pitch, roll]       array to store the calculated pitch and roll
-int smoothTimer = 100;                                 // Time (in ms) to smooth the rotation
-int MPUTaskDelay = 25;                                 // Time (in ms) to wait between each loop
-int smootherSize = (smoothTimer + 100) / MPUTaskDelay; // Number of values to store to smooth the rotation
+float offsetPR[2] = {0},                                       // [pitch, roll]       array to store the offset pitch and roll
+    calculatedRotations[2] = {0},                              // [pitch, roll]       array to store the calculated pitch and roll
+    maxRotation[2][2] = {{-60.0, 60.0},                            // [[minPitch, maxPitch],
+                         {-45.0, 75.0}};                           // [minRoll, maxRoll]] array to store the minimun and maximum pitch and roll degrees
+int smoothTimer = 200,                                         // Time (in ms) to smooth the rotation
+    MPUTaskDelay = 25,                                         // Time (in ms) to wait between each loop
+    screenSize[2] = {1920, 1080},                              // [width, height]     array to store the screen size
+    mousePosition[2] = {screenSize[0] / 2, screenSize[1] / 2}; // [x, y]              array to store the mouse position
 
 // Task to handle the MPU
 TaskHandle_t MPUTaskHandler = NULL;
@@ -26,10 +29,10 @@ void MPUTask(void *pvParameters) {
     float avgPR[2] = {0}; // [pitch, roll]        array to store the average pitch and roll
 
     // Declaration of variables that handle, control and store the status data of the MPU
-    bool dmpReady = false;                              // set true if DMP init was successful
-    uint8_t fifoBuffer[64];                             // FIFO storage buffer
-    float rotationSmootherArray[smootherSize][2] = {0}; // [pitch, roll] array to store the last X values of pitch and roll to calculate and smooth the rotation
-    int rotationSmootherIndex = 0;                      // Index to store the current value of the rotationSmootherArray
+    bool dmpReady = false;                                              // set true if DMP init was successful
+    uint8_t fifoBuffer[64];                                             // FIFO storage buffer
+    float rotationSmootherArray[(smoothTimer / MPUTaskDelay)][2] = {0}; // [pitch, roll] array to store the last X values of pitch and roll to calculate and smooth the rotation
+    int rotationSmootherIndex = 0;                                      // Index to store the current value of the rotationSmootherArray
 
     Wire.begin();
     Wire.setClock(400000);
@@ -50,13 +53,13 @@ void MPUTask(void *pvParameters) {
         dmpReady = true;
         digitalWrite(2, HIGH);
     } else {
-        Serial.println("DMP Initialization failed");
+        vTaskDelete(NULL);
     }
 
     const TickType_t taskDelay = MPUTaskDelay / portTICK_PERIOD_MS;
     TickType_t lastExecutionTime = xTaskGetTickCount();
     int timer = 0;
-    for (;;) {
+    while (dmpReady) {
         vTaskDelayUntil(&lastExecutionTime, taskDelay);
 
         if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
@@ -69,49 +72,49 @@ void MPUTask(void *pvParameters) {
             for (int i = 0; i <= 1; i++) {
                 rotationSmootherArray[rotationSmootherIndex][i] = ypr[i + 1] * 180 / M_PI;
 
-                for (int j = 0; j < smootherSize; j++) {
+                for (int j = 0; j < (smoothTimer / MPUTaskDelay); j++) {
                     avgPR[i] += rotationSmootherArray[j][i];
                 }
-                avgPR[i] = (avgPR[i] / smootherSize) - offsetPR[i];
+                avgPR[i] = (avgPR[i] / (smoothTimer / MPUTaskDelay)) - offsetPR[i];
 
-                if (avgPR[i] > 5 || avgPR[i] < -5) {
-                    calculatedRotations[i] = map(avgPR[i], -90, 90, 50, -50);
-                    calculatedRotations[i] = (0.024 * calculatedRotations[i] * abs(calculatedRotations[i])) - 0.2 * abs(calculatedRotations[i]);
-                } else {
-                    calculatedRotations[i] = 0;
-                }
+                // Limit the rotation to the maxRotation values
+                if (avgPR[i] < maxRotation[i][0])
+                    avgPR[i] = maxRotation[i][0];
+                if (avgPR[i] > maxRotation[i][1])
+                    avgPR[i] = maxRotation[i][1];
+
+                calculatedRotations[i] = map(avgPR[i] * 100, maxRotation[i][0] * 100, maxRotation[i][1] * 100, screenSize[i], 0);
             }
-            rotationSmootherIndex = (rotationSmootherIndex + 1) % smootherSize;
+
+            rotationSmootherIndex = (rotationSmootherIndex + 1) % (smoothTimer / MPUTaskDelay);
         }
     }
 }
-
-// * BLE Mouse task
-
-// Fill touch data
 
 BleMouse bleMouse("Glouse", "gabu", 100);
 
 void setup() {
     Serial.begin(115200);
 
-    delay(200);
+    delay(500);
     xTaskCreatePinnedToCore(MPUTask, "MPUTask", 20000, NULL, 1, &MPUTaskHandler, 1);
-
-    delay(200);
+    delay(500);
     bleMouse.begin();
 
     pinMode(2, OUTPUT);
 }
 
-// Readable touches:
-// T3: pin 15
-// T4: pin 13
-// T5: pin 12
-// T6: pin 14
-// T7: pin 27
-// T8: pin 33
-// T9: pin 32
+/* Readable touches:
+Tpin | GPIO | Glove
+T3   | 15   |  A1
+T4   | 13   |  A2
+T5   | 12   |  A3
+T6   | 14   |  B1
+T7   | 27   |  B2
+T8   | 33   |  C1
+T9   | 32   |  C2
+*/
+
 typedef struct MouseButton {
     int touchPin;
     int mouseButton;
@@ -119,27 +122,71 @@ typedef struct MouseButton {
     int touchValueTreshold;
     bool pressed;
 } MouseButton;
+
 // Delaration of mouse clicks
 MouseButton mouseButtons[3] = {
     {T3, MOUSE_LEFT, 100, 20, false},
     {T4, MOUSE_RIGHT, 100, 20, false},
     {T5, MOUSE_MIDDLE, 100, 20, false},
 };
+
 int minLoopTimer = 0;
+bool firstRun = true;
+
 void loop() {
 
     if (bleMouse.isConnected()) {
-        // Rotate the mouse, and the scroll if button X is pressed
-        bleMouse.move(calculatedRotations[0], calculatedRotations[1], 0);
+        // Set the initial position of the mouse to the center of the screen
+        if (firstRun) {
+            Serial.println("First run");
+            bleMouse.move(-screenSize[0], -screenSize[1], 0);
+            Serial.print(-screenSize[0]);
+            Serial.print(" ");
+            Serial.print(-screenSize[1]);
+            Serial.print(" ");
+            Serial.println("Moved mouse to corner");
+            bleMouse.move(mousePosition[0], mousePosition[1], 0);
+            Serial.print(mousePosition[0]);
+            Serial.print(" ");
+            Serial.print(mousePosition[1]);
+            Serial.print(" ");
+            Serial.println("Moved mouse to center");
+            firstRun = false;
+            delay(1000);
+        } else {
+            Serial.print("Calculated rotations: ");
+            Serial.print(calculatedRotations[0]);
+            Serial.print("\t");
+            Serial.print(calculatedRotations[1]);
+            Serial.print("\t");
 
-        // Code for mouse buttons
-        for (int i = 0; i < 3; i++) {
-            mouseButtons[i].touchValue = touchRead(mouseButtons[i].touchPin);
-            mouseButtons[i].pressed = bleMouse.isPressed(mouseButtons[i].mouseButton);
-            if (mouseButtons[i].touchValue > mouseButtons[i].touchValueTreshold && mouseButtons[i].pressed) {
-                bleMouse.release(mouseButtons[i].mouseButton);
-            } else if (mouseButtons[i].touchValue < mouseButtons[i].touchValueTreshold && !mouseButtons[i].pressed) {
-                bleMouse.press(mouseButtons[i].mouseButton);
+            Serial.print("Mouse position: ");
+            Serial.print(mousePosition[0]);
+            Serial.print("\t");
+            Serial.print(mousePosition[1]);
+            Serial.print("\t");
+
+            Serial.print("Difference to move: ");
+            Serial.print(calculatedRotations[0] - mousePosition[0]);
+            Serial.print("\t");
+            Serial.print(calculatedRotations[1] - mousePosition[1]);
+            Serial.print("\t");
+            Serial.println();
+
+            // Code for mouse movement
+            bleMouse.move(calculatedRotations[0] - mousePosition[0], calculatedRotations[1] - mousePosition[1], 0);
+            mousePosition[0] = calculatedRotations[0];
+            mousePosition[1] = calculatedRotations[1];
+
+            // Code for mouse buttons
+            for (int i = 0; i < 3; i++) {
+                mouseButtons[i].touchValue = touchRead(mouseButtons[i].touchPin);
+                mouseButtons[i].pressed = bleMouse.isPressed(mouseButtons[i].mouseButton);
+                if (mouseButtons[i].touchValue > mouseButtons[i].touchValueTreshold && mouseButtons[i].pressed) {
+                    bleMouse.release(mouseButtons[i].mouseButton);
+                } else if (mouseButtons[i].touchValue < mouseButtons[i].touchValueTreshold && !mouseButtons[i].pressed) {
+                    bleMouse.press(mouseButtons[i].mouseButton);
+                }
             }
         }
     }
