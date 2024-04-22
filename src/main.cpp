@@ -1,22 +1,51 @@
+// * Libraries
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"
 #include "Wire.h"
 #include <Arduino.h>
 #include <BleMouse.h>
 
-MPU6050 mpu;
+// *  Glove pin definition
+#define A1 T3 // Left click
+#define A2 T7 // Back
+#define A3 T8 // Foward
+#define B1 T9 // Right click
+#define B2 T6 // Middle click
+#define C1 T4 // Scroll (special)
+#define C2 T5 // Config (special)
 
-bool blinkState = false;
+
+// Glove| Tpin | GPIO | Mouse
+// A1   | T3   | 15   | Left
+// A2   | T7   | 13   | Back
+// A3   | T8   | 12   | Foward
+// B1   | T9   | 14   | Right
+// B2   | T6   | 27   | Middle
+// C1   | T4   | 33   | Scroll (special)
+// C2   | T5   | 32   | Config (special)
+
+
+// * Functions
+void moveMouse(int widthCurrentPosition, int heightCurrentPosition, int widthNewPosition, int heightNewPosition);
+
+// * Variables
+MPU6050 mpu; // MPU6050 object
+BleMouse bleMouse("Glouse", "gabu", 100);
+
+bool blinkState = false; // State of the LED on pin 13
+
+const int smoothTimer = 200,     // Time (in ms) to smooth the rotation
+    MPUTaskDelay = 25,           // Time (in ms) to wait between each loop
+    screenSize[2] = {1366, 768}; // [width, height]     array to store the screen size
+
+int mousePosition[2] = {0},    // [x, y]              array to store the mouse position
+    newMousePosition[2] = {0}; // [x, y]              array to store the new mouse position
 
 // Variable to handle the rotation
-float offsetPR[2] = {0},                                       // [pitch, roll]       array to store the offset pitch and roll
-    calculatedRotations[2] = {0},                              // [pitch, roll]       array to store the calculated pitch and roll
-    maxRotation[2][2] = {{-60.0, 60.0},                            // [[minPitch, maxPitch],
-                         {-45.0, 75.0}};                           // [minRoll, maxRoll]] array to store the minimun and maximum pitch and roll degrees
-int smoothTimer = 200,                                         // Time (in ms) to smooth the rotation
-    MPUTaskDelay = 25,                                         // Time (in ms) to wait between each loop
-    screenSize[2] = {1920, 1080},                              // [width, height]     array to store the screen size
-    mousePosition[2] = {screenSize[0] / 2, screenSize[1] / 2}; // [x, y]              array to store the mouse position
+float calculatedPR[2] = {0},             // [pitch, roll]       array to store the calculated pitch and roll
+    offsetPR[2] = {0},                   // [pitch, roll]       array to store the offset pitch and roll
+    maxRotation[2][2] = {{-60.0, 60.0},  // [[minPitch, maxPitch],
+                         {-45.0, 75.0}}; // [minRoll, maxRoll]] array to store the minimun and maximum pitch and roll degrees
 
 // Task to handle the MPU
 TaskHandle_t MPUTaskHandler = NULL;
@@ -78,12 +107,12 @@ void MPUTask(void *pvParameters) {
                 avgPR[i] = (avgPR[i] / (smoothTimer / MPUTaskDelay)) - offsetPR[i];
 
                 // Limit the rotation to the maxRotation values
-                if (avgPR[i] < maxRotation[i][0])
-                    avgPR[i] = maxRotation[i][0];
-                if (avgPR[i] > maxRotation[i][1])
-                    avgPR[i] = maxRotation[i][1];
+                // if (avgPR[i] < maxRotation[i][0])
+                //     avgPR[i] = maxRotation[i][0];
+                // if (avgPR[i] > maxRotation[i][1])
+                //     avgPR[i] = maxRotation[i][1];
 
-                calculatedRotations[i] = map(avgPR[i] * 100, maxRotation[i][0] * 100, maxRotation[i][1] * 100, screenSize[i], 0);
+                calculatedPR[i] = avgPR[i] - offsetPR[i];
             }
 
             rotationSmootherIndex = (rotationSmootherIndex + 1) % (smoothTimer / MPUTaskDelay);
@@ -91,30 +120,17 @@ void MPUTask(void *pvParameters) {
     }
 }
 
-BleMouse bleMouse("Glouse", "gabu", 100);
-
 void setup() {
-    Serial.begin(115200);
 
-    delay(500);
+    delay(100);
     xTaskCreatePinnedToCore(MPUTask, "MPUTask", 20000, NULL, 1, &MPUTaskHandler, 1);
-    delay(500);
+    delay(100);
     bleMouse.begin();
 
     pinMode(2, OUTPUT);
 }
 
-/* Readable touches:
-Tpin | GPIO | Glove
-T3   | 15   |  A1
-T4   | 13   |  A2
-T5   | 12   |  A3
-T6   | 14   |  B1
-T7   | 27   |  B2
-T8   | 33   |  C1
-T9   | 32   |  C2
-*/
-
+// * Struct to handle the mouse buttons
 typedef struct MouseButton {
     int touchPin;
     int mouseButton;
@@ -124,10 +140,12 @@ typedef struct MouseButton {
 } MouseButton;
 
 // Delaration of mouse clicks
-MouseButton mouseButtons[3] = {
+MouseButton mouseButtons[5] = {
     {T3, MOUSE_LEFT, 100, 20, false},
-    {T4, MOUSE_RIGHT, 100, 20, false},
-    {T5, MOUSE_MIDDLE, 100, 20, false},
+    {T7, MOUSE_BACK, 100, 20, false},
+    {T8, MOUSE_FORWARD, 100, 20, false},
+    {T9, MOUSE_RIGHT, 100, 20, false},
+    {T6, MOUSE_MIDDLE, 100, 20, false},
 };
 
 int minLoopTimer = 0;
@@ -138,48 +156,31 @@ void loop() {
     if (bleMouse.isConnected()) {
         // Set the initial position of the mouse to the center of the screen
         if (firstRun) {
-            Serial.println("First run");
-            bleMouse.move(-screenSize[0], -screenSize[1], 0);
-            Serial.print(-screenSize[0]);
-            Serial.print(" ");
-            Serial.print(-screenSize[1]);
-            Serial.print(" ");
-            Serial.println("Moved mouse to corner");
-            bleMouse.move(mousePosition[0], mousePosition[1], 0);
-            Serial.print(mousePosition[0]);
-            Serial.print(" ");
-            Serial.print(mousePosition[1]);
-            Serial.print(" ");
-            Serial.println("Moved mouse to center");
+            moveMouse(screenSize[0], screenSize[1], 0, 0);
+            moveMouse(0, 0, screenSize[0] / 2, screenSize[1] / 2);
+            mousePosition[0] = screenSize[0] / 2;
+            mousePosition[1] = screenSize[1] / 2;
             firstRun = false;
-            delay(1000);
         } else {
-            Serial.print("Calculated rotations: ");
-            Serial.print(calculatedRotations[0]);
-            Serial.print("\t");
-            Serial.print(calculatedRotations[1]);
-            Serial.print("\t");
 
-            Serial.print("Mouse position: ");
-            Serial.print(mousePosition[0]);
-            Serial.print("\t");
-            Serial.print(mousePosition[1]);
-            Serial.print("\t");
+            // Don't move the mouse if the user is touching the C2 button
+            if (touchRead(C2) > 20) {
 
-            Serial.print("Difference to move: ");
-            Serial.print(calculatedRotations[0] - mousePosition[0]);
-            Serial.print("\t");
-            Serial.print(calculatedRotations[1] - mousePosition[1]);
-            Serial.print("\t");
-            Serial.println();
+                // Code for mouse movement and wheel
+                if (touchRead(T4) < 20) {
+                    bleMouse.move(0, 0, calculatedPR[0] / abs(calculatedPR[0]), calculatedPR[1] / abs(calculatedPR[1]));
+                } else {
+                    for (int i = 0; i < 2; i++){
+                        mousePosition[i] = newMousePosition[i];
+                        newMousePosition[i] = map(calculatedPR[i] * 100, maxRotation[i][0] * 100, maxRotation[i][1] * 100, screenSize[i], 0);
+                    }
 
-            // Code for mouse movement
-            bleMouse.move(calculatedRotations[0] - mousePosition[0], calculatedRotations[1] - mousePosition[1], 0);
-            mousePosition[0] = calculatedRotations[0];
-            mousePosition[1] = calculatedRotations[1];
+                    moveMouse(mousePosition[0], mousePosition[1], newMousePosition[0], newMousePosition[1]);
+                }
+            }
 
             // Code for mouse buttons
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 5; i++) {
                 mouseButtons[i].touchValue = touchRead(mouseButtons[i].touchPin);
                 mouseButtons[i].pressed = bleMouse.isPressed(mouseButtons[i].mouseButton);
                 if (mouseButtons[i].touchValue > mouseButtons[i].touchValueTreshold && mouseButtons[i].pressed) {
@@ -196,4 +197,34 @@ void loop() {
         delay(20 - (millis() - minLoopTimer));
     }
     minLoopTimer = millis();
+}
+
+/* Function to move the mouse
+ *
+ * @param widthCurrentPosition: The current width position of the mouse (varies from 0 to 1920)
+ * @param heightCurrentPosition: The current height position of the mouse (varies from 0 to 1080)
+ * @param widthNewPosition: The new width position of the mouse
+ * @param heightNewPosition: The new height position of the mouse
+ */
+
+unsigned long previousMillis = 0;
+
+void moveMouse(int widthCurrentPosition, int heightCurrentPosition, int widthNewPosition, int heightNewPosition) {
+    int widthDifference = widthNewPosition - widthCurrentPosition,
+        heightDifference = heightNewPosition - heightCurrentPosition;
+
+    // Move the mouse to the new position
+    // If the difference is more then 128, it has to move in steps, in both directions at the same time with a delay of 20ms
+    if (abs(widthDifference) > 128 || abs(heightDifference) > 128) {
+        int steps = max(abs(widthDifference), abs(heightDifference)) / 128;
+        for (int i = 0; i < steps; i++) {
+            while (millis() - previousMillis < 20) {
+                // Wait until 20ms has passed
+            }
+            previousMillis = millis();
+            bleMouse.move(widthDifference / steps, heightDifference / steps, 0, 0);
+        }
+    } else {
+        bleMouse.move(widthDifference, heightDifference, 0, 0);
+    }
 }
