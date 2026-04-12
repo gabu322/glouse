@@ -162,10 +162,10 @@ Built on the confirmed functionality of v1, focused on ergonomics and portabilit
 | BLE HID connection | ✅ Working |
 | Cursor movement (pitch/roll) | ✅ Working |
 | Click detection (capacitive) | ✅ Working |
-| Scroll gesture | 🔄 Partial |
+| Scroll gesture | ✅ Working |
 | OLED status display | 🔄 In progress |
 | Wiring diagram | 📋 Pending |
-| Sensitivity calibration UI | 📋 Planned |
+| Sensitivity calibration UI (on display) | 📋 Planned |
 
 > This project is in active development. Some features and wiring details may change.
 
