@@ -6,12 +6,12 @@
 #include <BleMouse.h>
 
 // *  Glove pin definition
-#define A1 T3 // Left click
-#define A2 T7 // Back
-#define A3 T8 // Foward
-#define B1 T9 // Right click
+#define A1 T0 // Left click
+#define A2 T9 // Back
+#define A3 T4 // Foward
+#define B1 T7 // Right click
 #define B2 T6 // Middle click
-#define C1 T4 // Scroll (special)
+#define C1 T8 // Scroll (special)
 #define C2 T5 // Config (special)
 
 // Glove| Tpin | GPIO | Mouse
@@ -34,7 +34,12 @@ const int MPUTaskDelay = 25;                         // Time (in ms) to wait bet
 const int smoothTimer = 200;                         // Time (in ms) to smooth the rotation
 const int smoothCycles = smoothTimer / MPUTaskDelay; // Number of cycles to smooth the rotation
 
-int minLoopTimer = 0; // Timer to ensure the loop runs at a minimum rate
+int minLoopTimer = 0;            // Timer to ensure the loop runs at a minimum rate
+unsigned long pin25LowTimer = 0; // Timer for the last LOW pulse start on GPIO 25
+bool pin25IsLow = false;         // Tracks whether GPIO 25 is currently in the LOW pulse window
+
+const unsigned long pin25LowInterval = 20000; // Time (in ms) between each GPIO 25 low write
+const unsigned long pin25LowDuration = 500;   // Time (in ms) to keep GPIO 25 LOW
 
 float
     pointerSensitivity = 0.5, // Sensitivity of the pointer
@@ -140,6 +145,8 @@ void setup() {
    bleMouse.begin();
 
    pinMode(2, OUTPUT);
+   pinMode(25, OUTPUT);
+   digitalWrite(25, HIGH);
 }
 
 // * Struct to handle the mouse buttons
@@ -160,6 +167,19 @@ MouseButton mouseButtons[5] = {
 };
 
 void loop() {
+
+   // Start a LOW pulse on GPIO 25 every 20 seconds
+   if (!pin25IsLow && millis() - pin25LowTimer >= pin25LowInterval) {
+      digitalWrite(25, LOW);
+      pin25IsLow = true;
+      pin25LowTimer = millis();
+   }
+
+   // End the LOW pulse after 500 ms
+   if (pin25IsLow && millis() - pin25LowTimer >= pin25LowDuration) {
+      digitalWrite(25, HIGH);
+      pin25IsLow = false;
+   }
 
    // Check if the BLE Mouse is connected
    if (bleMouse.isConnected()) {
