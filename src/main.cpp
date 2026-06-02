@@ -39,16 +39,16 @@ unsigned long pin25LowTimer = 0; // Timer for the last LOW pulse start on GPIO 2
 bool pin25IsLow = false;         // Tracks whether GPIO 25 is currently in the LOW pulse window
 
 typedef struct TouchReadings {
-   int A1;
-   int A2;
-   int A3;
-   int B1;
-   int B2;
-   int C1;
-   int C2;
+   bool A1;
+   bool A2;
+   bool A3;
+   bool B1;
+   bool B2;
+   bool C1;
+   bool C2;
 } TouchReadings;
 
-TouchReadings touchReadings = {0}; // Stores the latest reading for every touch button
+TouchReadings touchedButtons = {false}; // Stores whether each touch button is touched
 
 const unsigned long pin25LowInterval = 20000; // Time (in ms) between each GPIO 25 low write
 const unsigned long pin25LowDuration = 500;   // Time (in ms) to keep GPIO 25 LOW
@@ -177,27 +177,27 @@ MouseButton mouseButtons[5] = {
 };
 
 void readTouchPins() {
-   touchReadings.A1 = touchRead(A1);
-   touchReadings.A2 = touchRead(A2);
-   touchReadings.A3 = touchRead(A3);
-   touchReadings.B1 = touchRead(B1);
-   touchReadings.B2 = touchRead(B2);
-   touchReadings.C1 = touchRead(C1);
-   touchReadings.C2 = touchRead(C2);
+   touchedButtons.A1 = touchRead(A1) < 20;
+   touchedButtons.A2 = touchRead(A2) < 20;
+   touchedButtons.A3 = touchRead(A3) < 20;
+   touchedButtons.B1 = touchRead(B1) < 20;
+   touchedButtons.B2 = touchRead(B2) < 20;
+   touchedButtons.C1 = touchRead(C1) < 20;
+   touchedButtons.C2 = touchRead(C2) < 20;
 }
 
 bool isMouseButtonTouched(int index) {
    switch (index) {
    case 0:
-      return touchReadings.A1 < 20;
+      return touchedButtons.A1;
    case 1:
-      return touchReadings.A2 < 20;
+      return touchedButtons.A2;
    case 2:
-      return touchReadings.A3 < 20;
+      return touchedButtons.A3;
    case 3:
-      return touchReadings.B1 < 20;
+      return touchedButtons.B1;
    case 4:
-      return touchReadings.B2 < 20;
+      return touchedButtons.B2;
    default:
       return false;
    }
@@ -218,47 +218,43 @@ void keepBatteryAlivePinOn() {
    }
 }
 
+void handleConnectedMouse() {
+   // Don't move the mouse if the user is touching the C2 button
+   if (!touchedButtons.C2) {
+
+      if (touchedButtons.C1) // Wheel when C1 is touched
+         bleMouse.move(0, 0, -(currentPR[1] - previousPR[1]) * scrollSensitivity * LoopTimer, -(currentPR[0] - previousPR[0]) * scrollSensitivity * LoopTimer);
+      else // Pointer
+         bleMouse.move((currentPR[0] - previousPR[0]) * 1.6 * pointerSensitivity * LoopTimer, (currentPR[1] - previousPR[1]) * 0.9 * pointerSensitivity * LoopTimer, 0, 0);
+   }
+
+   // After moving the mouse, store the previous values of the pitch and roll
+   previousPR[0] = currentPR[0];
+   previousPR[1] = currentPR[1];
+
+   // Code for mouse buttons
+   for (int i = 0; i < 5; i++) {
+      bool isTouched = isMouseButtonTouched(i);
+
+      // Check if the button is pressed or released, and send the corresponding command
+      if (!isTouched && mouseButtons[i].pressed) {
+         bleMouse.release(mouseButtons[i].mouseButton);
+         mouseButtons[i].pressed = false;
+      } else if (isTouched && !mouseButtons[i].pressed) {
+         bleMouse.press(mouseButtons[i].mouseButton);
+         mouseButtons[i].pressed = true;
+      }
+   }
+}
+
 void loop() {
    readTouchPins();
 
    keepBatteryAlivePinOn();
 
-   // Check if the BLE Mouse is connected
-   if (bleMouse.isConnected()) {
-
-      // Don't move the mouse if the user is touching the C2 button
-      if (touchReadings.C2 > 20) {
-
-         // Code for mouse movement and wheel
-         if (touchReadings.C1 < 20) {
-            bleMouse.move(0, 0, -(currentPR[1] - previousPR[1]) * scrollSensitivity * LoopTimer, -(currentPR[0] - previousPR[0]) * scrollSensitivity * LoopTimer);
-         } else {
-            bleMouse.move((currentPR[0] - previousPR[0]) * 1.6 * pointerSensitivity * LoopTimer, (currentPR[1] - previousPR[1]) * 0.9 * pointerSensitivity * LoopTimer, 0, 0);
-         }
-      }
-
-      // After moving the mouse, store the previous values of the pitch and roll
-      previousPR[0] = currentPR[0];
-      previousPR[1] = currentPR[1];
-
-      // Code for mouse buttons
-      for (int i = 0; i < 5; i++) {
-         bool isTouched = isMouseButtonTouched(i);
-
-         // Check if the button is pressed or released, and send the corresponding command
-         if (!isTouched && mouseButtons[i].pressed) {
-            bleMouse.release(mouseButtons[i].mouseButton);
-            mouseButtons[i].pressed = false;
-         } else if (isTouched && !mouseButtons[i].pressed) {
-            bleMouse.press(mouseButtons[i].mouseButton);
-            mouseButtons[i].pressed = true;
-         }
-      }
-   }
+   if (bleMouse.isConnected()) handleConnectedMouse();
 
    // Ensure the loop runs at a minimum rate
-   if (millis() - minLoopTimer < LoopTimer) {
-      delay(LoopTimer - (millis() - minLoopTimer));
-   }
+   if (millis() - minLoopTimer < LoopTimer) delay(LoopTimer - (millis() - minLoopTimer));
    minLoopTimer = millis();
 }
