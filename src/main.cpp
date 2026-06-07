@@ -51,6 +51,7 @@ const float movementConfigStep = 0.05;
 int minLoopTimer = 0;            // Timer to ensure the loop runs at a minimum rate
 unsigned long pin25LowTimer = 0; // Timer for the last LOW pulse start on GPIO 25
 bool pin25IsLow = false;         // Tracks whether GPIO 25 is currently in the LOW pulse window
+unsigned long debugLogTimer = 0;
 
 typedef struct TouchReadings {
    bool A1;
@@ -274,8 +275,7 @@ void handleConfigMode() {
    configLockPressed = touchedButtons.B2;
 }
 
-void handleConnectedMouse() {
-   bool isBleConnected = bleMouse.isConnected();
+void handleMouseConnection() {
    bool isConfigTogglePressed = touchedButtons.C1 && touchedButtons.C2;
 
    if (!isMPUReady) {
@@ -289,9 +289,22 @@ void handleConnectedMouse() {
 
    if (isConfigMode) handleConfigMode();
    else configLockPressed = false;
+}
+
+void handleConnectedMouse() {
+   if (isConfigMode) {
+      for (int i = 0; i < 5; i++) {
+         if (mouseButtons[i].pressed) {
+            bleMouse.release(mouseButtons[i].mouseButton);
+            mouseButtons[i].pressed = false;
+         }
+      }
+
+      return;
+   }
 
    // Don't move the mouse if the user is touching the C2 button
-   if (!touchedButtons.C2 && isBleConnected) {
+   if (!touchedButtons.C2) {
       float deltaXMovement = currentPR[0] - previousPR[0];
       float deltaYMovement = currentPR[1] - previousPR[1];
 
@@ -306,22 +319,9 @@ void handleConnectedMouse() {
       else bleMouse.move(deltaX, deltaY, 0, 0); // Mouse Pointer
    }
 
-   // After moving the mouse, store the previous values of the pitch and roll
+   // After moving the mouse, store the previous values of the pitch and roll.
    previousPR[0] = currentPR[0];
    previousPR[1] = currentPR[1];
-
-   if (!isBleConnected) return;
-
-   if (isConfigMode) {
-      for (int i = 0; i < 5; i++) {
-         if (mouseButtons[i].pressed) {
-            bleMouse.release(mouseButtons[i].mouseButton);
-            mouseButtons[i].pressed = false;
-         }
-      }
-
-      return;
-   }
 
    // Code for mouse buttons
    for (int i = 0; i < 5; i++) {
@@ -343,7 +343,9 @@ void loop() {
 
    keepBatteryAlivePinOn();
 
-   handleConnectedMouse();
+   handleMouseConnection();
+
+   if (bleMouse.isConnected()) handleConnectedMouse();
 
    // Ensure the loop runs at a minimum rate
    if (millis() - minLoopTimer < LoopTimer) delay(LoopTimer - (millis() - minLoopTimer));
