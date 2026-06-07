@@ -151,8 +151,7 @@ void MPUTask(void *pvParameters) {
             avgPR[i] = avgPR[i] / ((smoothCycles) + 1);
 
             // If the user is touching the C2 button, set the offset to the current value
-            if (touchRead(C2) < 20)
-               offsetPR[i] = avgPR[i];
+            if (touchRead(C2) < 20) offsetPR[i] = avgPR[i];
 
             // Calculate the final value of the rotation
             currentPR[i] = avgPR[i] - offsetPR[i];
@@ -263,6 +262,9 @@ void handleConfigMode() {
    if (touchedButtons.A2) yMovementMultiplier += movementConfigStep;
    if (touchedButtons.A3) yMovementMultiplier -= movementConfigStep;
 
+   if (xMovementMultiplier < 0) xMovementMultiplier = 0;
+   if (yMovementMultiplier < 0) yMovementMultiplier = 0;
+
    if (touchedButtons.B2 && !configLockPressed) {
       if (movementLockMode == MOVEMENT_UNLOCKED) movementLockMode = LOCK_X_MOVEMENT;
       else if (movementLockMode == LOCK_X_MOVEMENT) movementLockMode = LOCK_Y_MOVEMENT;
@@ -273,6 +275,7 @@ void handleConfigMode() {
 }
 
 void handleConnectedMouse() {
+   bool isBleConnected = bleMouse.isConnected();
    bool isConfigTogglePressed = touchedButtons.C1 && touchedButtons.C2;
 
    if (!isMPUReady) {
@@ -288,7 +291,7 @@ void handleConnectedMouse() {
    else configLockPressed = false;
 
    // Don't move the mouse if the user is touching the C2 button
-   if (!touchedButtons.C2) {
+   if (!touchedButtons.C2 && isBleConnected) {
       float deltaXMovement = currentPR[0] - previousPR[0];
       float deltaYMovement = currentPR[1] - previousPR[1];
 
@@ -306,6 +309,8 @@ void handleConnectedMouse() {
    // After moving the mouse, store the previous values of the pitch and roll
    previousPR[0] = currentPR[0];
    previousPR[1] = currentPR[1];
+
+   if (!isBleConnected) return;
 
    if (isConfigMode) {
       for (int i = 0; i < 5; i++) {
