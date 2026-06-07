@@ -28,11 +28,25 @@ MPU6050 mpu; // MPU6050 object
 BleMouse bleMouse("Glouse", "gabu", 100);
 
 bool blinkState = false; // State of the LED on pin 13
+bool isMPUReady = false;
+bool isConfigMode = false;
+bool configTogglePressed = false;
+bool configLockPressed = false;
+unsigned long ledBlinkTimer = 0;
+
+enum MovementLockMode {
+   MOVEMENT_UNLOCKED,
+   LOCK_X_MOVEMENT,
+   LOCK_Y_MOVEMENT,
+};
+
+MovementLockMode movementLockMode = MOVEMENT_UNLOCKED;
 
 const int LoopTimer = 20;                            // Time (in ms) to wait between each loop in the main loop
 const int MPUTaskDelay = 25;                         // Time (in ms) to wait between each loop in the MPU task
 const int smoothTimer = 200;                         // Time (in ms) to smooth the rotation
 const int smoothCycles = smoothTimer / MPUTaskDelay; // Number of cycles to smooth the rotation
+const float movementConfigStep = 0.05;
 
 int minLoopTimer = 0;            // Timer to ensure the loop runs at a minimum rate
 unsigned long pin25LowTimer = 0; // Timer for the last LOW pulse start on GPIO 25
@@ -56,8 +70,10 @@ const unsigned long pin25LowDuration = 500;   // Time (in ms) to keep GPIO 25 LO
 float
     pointerSensitivity = 0.5, // Sensitivity of the pointer
     scrollSensitivity = 0.05, // Sensitivity of the scroll
-    currentPR[2] = {0},       // [pitch, roll]       array to store the calculated pitch and roll
-    previousPR[2] = {0}       // [pitch, roll]       array to store the previous pitch and roll angles
+    xMovementMultiplier = 1.6,
+    yMovementMultiplier = 0.9,
+    currentPR[2] = {0}, // [pitch, roll]       array to store the calculated pitch and roll
+    previousPR[2] = {0} // [pitch, roll]       array to store the previous pitch and roll angles
 ;
 
 // Task to handle the MPU
@@ -104,6 +120,7 @@ void MPUTask(void *pvParameters) {
       digitalWrite(2, HIGH);
 
       dmpReady = true;
+      isMPUReady = true;
    } else {
       vTaskDelete(NULL);
    }
@@ -218,19 +235,88 @@ void keepBatteryAlivePinOn() {
    }
 }
 
+void toggleConfigMode() {
+   isConfigMode = !isConfigMode;
+   movementLockMode = MOVEMENT_UNLOCKED;
+
+   if (isConfigMode) {
+      blinkState = true;
+      ledBlinkTimer = millis();
+      digitalWrite(2, HIGH);
+   } else {
+      digitalWrite(2, HIGH);
+      blinkState = false;
+   }
+}
+
+void handleConfigMode() {
+   unsigned long currentTime = millis();
+
+   if (currentTime - ledBlinkTimer >= 1000) {
+      blinkState = !blinkState;
+      ledBlinkTimer = currentTime;
+      digitalWrite(2, blinkState ? HIGH : LOW);
+   }
+
+   if (touchedButtons.A1) xMovementMultiplier -= movementConfigStep;
+   if (touchedButtons.B1) xMovementMultiplier += movementConfigStep;
+   if (touchedButtons.A2) yMovementMultiplier += movementConfigStep;
+   if (touchedButtons.A3) yMovementMultiplier -= movementConfigStep;
+
+   if (touchedButtons.B2 && !configLockPressed) {
+      if (movementLockMode == MOVEMENT_UNLOCKED) movementLockMode = LOCK_X_MOVEMENT;
+      else if (movementLockMode == LOCK_X_MOVEMENT) movementLockMode = LOCK_Y_MOVEMENT;
+      else movementLockMode = MOVEMENT_UNLOCKED;
+   }
+
+   configLockPressed = touchedButtons.B2;
+}
+
 void handleConnectedMouse() {
+   bool isConfigTogglePressed = touchedButtons.C1 && touchedButtons.C2;
+
+   if (!isMPUReady) {
+      configTogglePressed = isConfigTogglePressed;
+      return;
+   }
+
+   if (isConfigTogglePressed && !configTogglePressed) toggleConfigMode();
+
+   configTogglePressed = isConfigTogglePressed;
+
+   if (isConfigMode) handleConfigMode();
+   else configLockPressed = false;
+
    // Don't move the mouse if the user is touching the C2 button
    if (!touchedButtons.C2) {
+      float deltaXMovement = currentPR[0] - previousPR[0];
+      float deltaYMovement = currentPR[1] - previousPR[1];
 
-      if (touchedButtons.C1) // Wheel when C1 is touched
-         bleMouse.move(0, 0, -(currentPR[1] - previousPR[1]) * scrollSensitivity * LoopTimer, -(currentPR[0] - previousPR[0]) * scrollSensitivity * LoopTimer);
-      else // Pointer
-         bleMouse.move((currentPR[0] - previousPR[0]) * 1.6 * pointerSensitivity * LoopTimer, (currentPR[1] - previousPR[1]) * 0.9 * pointerSensitivity * LoopTimer, 0, 0);
+      float deltaX = deltaXMovement * xMovementMultiplier * pointerSensitivity * LoopTimer;
+      float deltaY = deltaYMovement * yMovementMultiplier * pointerSensitivity * LoopTimer;
+
+      if (movementLockMode == LOCK_X_MOVEMENT) deltaX = 0;
+      else if (movementLockMode == LOCK_Y_MOVEMENT) deltaY = 0;
+
+      // Wheel when C1 is touched
+      if (touchedButtons.C1) bleMouse.move(0, 0, -deltaYMovement * scrollSensitivity * LoopTimer, -deltaXMovement * scrollSensitivity * LoopTimer);
+      else bleMouse.move(deltaX, deltaY, 0, 0); // Mouse Pointer
    }
 
    // After moving the mouse, store the previous values of the pitch and roll
    previousPR[0] = currentPR[0];
    previousPR[1] = currentPR[1];
+
+   if (isConfigMode) {
+      for (int i = 0; i < 5; i++) {
+         if (mouseButtons[i].pressed) {
+            bleMouse.release(mouseButtons[i].mouseButton);
+            mouseButtons[i].pressed = false;
+         }
+      }
+
+      return;
+   }
 
    // Code for mouse buttons
    for (int i = 0; i < 5; i++) {
@@ -252,7 +338,7 @@ void loop() {
 
    keepBatteryAlivePinOn();
 
-   if (bleMouse.isConnected()) handleConnectedMouse();
+   handleConnectedMouse();
 
    // Ensure the loop runs at a minimum rate
    if (millis() - minLoopTimer < LoopTimer) delay(LoopTimer - (millis() - minLoopTimer));
