@@ -4,6 +4,7 @@
 #include "Wire.h"
 #include <Arduino.h>
 #include <BleMouse.h>
+#include <Preferences.h>
 
 // *  Glove pin definition
 #define A1 T0 // Left click
@@ -26,6 +27,7 @@
 // Objects to handle the MPU and Mouse
 MPU6050 mpu; // MPU6050 object
 BleMouse bleMouse("Glouse", "gabu", 100);
+Preferences preferences;
 
 bool blinkState = false; // State of the LED on pin 13
 bool isMPUReady = false;
@@ -47,11 +49,13 @@ const int MPUTaskDelay = 25;                         // Time (in ms) to wait bet
 const int smoothTimer = 200;                         // Time (in ms) to smooth the rotation
 const int smoothCycles = smoothTimer / MPUTaskDelay; // Number of cycles to smooth the rotation
 const float movementConfigStep = 0.05;
+const char *preferencesNamespace = "glouse";
+const char *xConfigKey = "x_cfg_mult";
+const char *yConfigKey = "y_cfg_mult";
 
 int minLoopTimer = 0;            // Timer to ensure the loop runs at a minimum rate
 unsigned long pin25LowTimer = 0; // Timer for the last LOW pulse start on GPIO 25
 bool pin25IsLow = false;         // Tracks whether GPIO 25 is currently in the LOW pulse window
-unsigned long debugLogTimer = 0;
 
 typedef struct TouchReadings {
    bool A1;
@@ -71,11 +75,23 @@ const unsigned long pin25LowDuration = 500;   // Time (in ms) to keep GPIO 25 LO
 float
     pointerSensitivity = 0.5, // Sensitivity of the pointer
     scrollSensitivity = 0.05, // Sensitivity of the scroll
-    xMovementMultiplier = 1.6,
-    yMovementMultiplier = 0.9,
+    xFreeModeMultiplier = 1.0,
+    yFreeModeMultiplier = 1.0,
+    xScreenMovementMultiplier = 1.6,
+    yScreenMovementMultiplier = 0.9,
     currentPR[2] = {0}, // [pitch, roll]       array to store the calculated pitch and roll
     previousPR[2] = {0} // [pitch, roll]       array to store the previous pitch and roll angles
 ;
+
+void saveMovementConfig() {
+   preferences.putFloat(xConfigKey, xFreeModeMultiplier);
+   preferences.putFloat(yConfigKey, yFreeModeMultiplier);
+}
+
+void loadMovementConfig() {
+   xFreeModeMultiplier = preferences.getFloat(xConfigKey, xFreeModeMultiplier);
+   yFreeModeMultiplier = preferences.getFloat(yConfigKey, yFreeModeMultiplier);
+}
 
 // Task to handle the MPU
 TaskHandle_t MPUTaskHandler = NULL;
@@ -165,6 +181,9 @@ void MPUTask(void *pvParameters) {
 }
 
 void setup() {
+   preferences.begin(preferencesNamespace, false);
+   loadMovementConfig();
+
    // Creating the task to handle the MPU
    xTaskCreatePinnedToCore(MPUTask, "MPUTask", 20000, NULL, 1, &MPUTaskHandler, 1);
 
@@ -236,8 +255,12 @@ void keepBatteryAlivePinOn() {
 }
 
 void toggleConfigMode() {
+   bool wasConfigMode = isConfigMode;
+
    isConfigMode = !isConfigMode;
    movementLockMode = MOVEMENT_UNLOCKED;
+
+   if (wasConfigMode && !isConfigMode) saveMovementConfig();
 
    if (isConfigMode) {
       blinkState = true;
@@ -258,13 +281,10 @@ void handleConfigMode() {
       digitalWrite(2, blinkState ? HIGH : LOW);
    }
 
-   if (touchedButtons.A1) xMovementMultiplier -= movementConfigStep;
-   if (touchedButtons.B1) xMovementMultiplier += movementConfigStep;
-   if (touchedButtons.A2) yMovementMultiplier += movementConfigStep;
-   if (touchedButtons.A3) yMovementMultiplier -= movementConfigStep;
-
-   if (xMovementMultiplier < 0) xMovementMultiplier = 0;
-   if (yMovementMultiplier < 0) yMovementMultiplier = 0;
+   if (touchedButtons.A1 && xFreeModeMultiplier < 5.0) xFreeModeMultiplier += movementConfigStep;
+   if (touchedButtons.B1 && xFreeModeMultiplier > 0.5) xFreeModeMultiplier -= movementConfigStep;
+   if (touchedButtons.A2 && yFreeModeMultiplier < 5.0) yFreeModeMultiplier += movementConfigStep;
+   if (touchedButtons.A3 && yFreeModeMultiplier > 0.5) yFreeModeMultiplier -= movementConfigStep;
 
    if (touchedButtons.B2 && !configLockPressed) {
       if (movementLockMode == MOVEMENT_UNLOCKED) movementLockMode = LOCK_X_MOVEMENT;
@@ -305,11 +325,12 @@ void handleConnectedMouse() {
 
    // Don't move the mouse if the user is touching the C2 button
    if (!touchedButtons.C2) {
-      float deltaXMovement = currentPR[0] - previousPR[0];
-      float deltaYMovement = currentPR[1] - previousPR[1];
+      // Apply a small curve to the movement to feel more natural based on the distance moved
+      float deltaXMovement = pow(currentPR[0] - previousPR[0], 1.2);
+      float deltaYMovement = pow(currentPR[1] - previousPR[1], 1.2);
 
-      float deltaX = deltaXMovement * xMovementMultiplier * pointerSensitivity * LoopTimer;
-      float deltaY = deltaYMovement * yMovementMultiplier * pointerSensitivity * LoopTimer;
+      float deltaX = deltaXMovement * xFreeModeMultiplier * xScreenMovementMultiplier * pointerSensitivity * LoopTimer;
+      float deltaY = deltaYMovement * yFreeModeMultiplier * yScreenMovementMultiplier * pointerSensitivity * LoopTimer;
 
       if (movementLockMode == LOCK_X_MOVEMENT) deltaX = 0;
       else if (movementLockMode == LOCK_Y_MOVEMENT) deltaY = 0;
