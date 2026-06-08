@@ -77,7 +77,7 @@ float
     scrollSensitivity = 0.05, // Sensitivity of the scroll
     xFreeModeMultiplier = 1.0,
     yFreeModeMultiplier = 1.0,
-    xScreenMovementMultiplier = 1.6,
+    xScreenMovementMultiplier = 1.9,
     yScreenMovementMultiplier = 0.9,
     currentPR[2] = {0}, // [pitch, roll]       array to store the calculated pitch and roll
     previousPR[2] = {0} // [pitch, roll]       array to store the previous pitch and roll angles
@@ -256,9 +256,17 @@ void keepBatteryAlivePinOn() {
 
 void toggleConfigMode() {
    bool wasConfigMode = isConfigMode;
-
    isConfigMode = !isConfigMode;
    movementLockMode = MOVEMENT_UNLOCKED;
+
+   if (!wasConfigMode && isConfigMode) {
+      for (int i = 0; i < 5; i++) {
+         if (mouseButtons[i].pressed) {
+            bleMouse.release(mouseButtons[i].mouseButton);
+            mouseButtons[i].pressed = false;
+         }
+      }
+   }
 
    if (wasConfigMode && !isConfigMode) saveMovementConfig();
 
@@ -312,22 +320,10 @@ void handleMouseConnection() {
 }
 
 void handleConnectedMouse() {
-   if (isConfigMode) {
-      for (int i = 0; i < 5; i++) {
-         if (mouseButtons[i].pressed) {
-            bleMouse.release(mouseButtons[i].mouseButton);
-            mouseButtons[i].pressed = false;
-         }
-      }
-
-      return;
-   }
-
    // Don't move the mouse if the user is touching the C2 button
    if (!touchedButtons.C2) {
-      // Apply a small curve to the movement to feel more natural based on the distance moved
-      float deltaXMovement = pow(currentPR[0] - previousPR[0], 1.2);
-      float deltaYMovement = pow(currentPR[1] - previousPR[1], 1.2);
+      float deltaXMovement = currentPR[0] - previousPR[0];
+      float deltaYMovement = currentPR[1] - previousPR[1];
 
       float deltaX = deltaXMovement * xFreeModeMultiplier * xScreenMovementMultiplier * pointerSensitivity * LoopTimer;
       float deltaY = deltaYMovement * yFreeModeMultiplier * yScreenMovementMultiplier * pointerSensitivity * LoopTimer;
@@ -343,6 +339,8 @@ void handleConnectedMouse() {
    // After moving the mouse, store the previous values of the pitch and roll.
    previousPR[0] = currentPR[0];
    previousPR[1] = currentPR[1];
+
+   if (isConfigMode) return;
 
    // Code for mouse buttons
    for (int i = 0; i < 5; i++) {
